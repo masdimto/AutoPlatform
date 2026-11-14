@@ -131,7 +131,8 @@ namespace AutoPlatformPlugin
 
             int startX = args.X;
             int startY = args.Y;
-            ushort placedTileType = args.EditData;
+            ushort placedTileType = (ushort)args.EditData;
+            
             byte style = args.Style;
 
             if (placedTileType != TileID.Platforms && placedTileType != TileID.PlanterBox)
