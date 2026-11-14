@@ -12,15 +12,16 @@ namespace AutoPlatformPlugin
     public class AutoPlatform : TerrariaPlugin
     {
         public override string Name => "AutoPlatform";
-        public override Version Version => new Version(1, 1, 0);
+        public override Version Version => new Version(1, 2, 0);
         public override string Author => "CustomPlugin";
-        public override string Description => "Memasang platform otomatis 8 arah (horizontal, vertikal, diagonal) sesuai pickaxe power.";
+        public override string Description => "Memasang platform otomatis 8 arah mengikuti arah penempatan (Smart Cursor).";
 
         private class PlayerPlatConfig
         {
             public bool Enabled { get; set; } = false;
             public int Length { get; set; } = 15;
             public bool BreakBlocks { get; set; } = false;
+            public Point? LastPlaced { get; set; } = null;
         }
 
         private Dictionary<int, PlayerPlatConfig> playerConfigs = new Dictionary<int, PlayerPlatConfig>();
@@ -67,10 +68,11 @@ namespace AutoPlatformPlugin
             if (args.Parameters.Count == 0)
             {
                 config.Enabled = !config.Enabled;
+                config.LastPlaced = null;
                 if (config.Enabled)
                 {
                     string modeText = config.BreakBlocks ? "BREAK (Tembus Blok)" : "UNBREAK (Stop di Blok)";
-                    args.Player.SendSuccessMessage($"[AutoPlat] Aktif! Panjang: {config.Length} | Mode: {modeText}. Taruh 1 platform ke arah yang diinginkan (8 arah)!");
+                    args.Player.SendSuccessMessage($"[AutoPlat] Aktif! Panjang: {config.Length} | Mode: {modeText}. Taruh 2 platform berurutan ke arah panah Smart Cursor!");
                 }
                 else
                 {
@@ -84,6 +86,7 @@ namespace AutoPlatformPlugin
             if (param == "off" || param == "stop" || param == "matikan")
             {
                 config.Enabled = false;
+                config.LastPlaced = null;
                 args.Player.SendInfoMessage("[AutoPlat] Dimatikan.");
             }
             else if (param == "break")
@@ -132,47 +135,69 @@ namespace AutoPlatformPlugin
             int startX = args.X;
             int startY = args.Y;
             ushort placedTileType = (ushort)args.EditData;
-            
             byte style = args.Style;
 
             if (placedTileType != TileID.Platforms && placedTileType != TileID.PlanterBox)
                 return;
 
-            Player player = tsPlayer.TPlayer;
-
-            Vector2 playerCenterTile = player.Center / 16f;
-            Vector2 delta = new Vector2(startX + 0.5f - playerCenterTile.X, startY + 0.5f - playerCenterTile.Y);
-
             int dirX = 0;
             int dirY = 0;
+            bool directionFound = false;
 
-            if (delta.LengthSquared() > 0.01f)
+            if (config.LastPlaced.HasValue)
             {
-                double angle = Math.Atan2(delta.Y, delta.X);
-                int sector = (int)Math.Round(angle / (Math.PI / 4.0));
-                switch (sector)
+                int dx = startX - config.LastPlaced.Value.X;
+                int dy = startY - config.LastPlaced.Value.Y;
+
+                if (Math.Abs(dx) <= 1 && Math.Abs(dy) <= 1 && (dx != 0 || dy != 0))
                 {
-                    case 0:  dirX = 1;  dirY = 0;  break;
-                    case 1:  dirX = 1;  dirY = 1;  break;
-                    case 2:  dirX = 0;  dirY = 1;  break;
-                    case 3:  dirX = -1; dirY = 1;  break;
-                    case 4:
-                    case -4: dirX = -1; dirY = 0;  break;
-                    case -3: dirX = -1; dirY = -1; break;
-                    case -2: dirX = 0;  dirY = -1; break;
-                    case -1: dirX = 1;  dirY = -1; break;
+                    dirX = dx;
+                    dirY = dy;
+                    directionFound = true;
                 }
             }
-            else
+
+            if (!directionFound)
             {
-                dirX = player.direction;
+                int[] checkX = { -1, 1, 0, 0, -1, 1, -1, 1 };
+                int[] checkY = { 0, 0, -1, 1, -1, -1, 1, 1 };
+
+                for (int i = 0; i < 8; i++)
+                {
+                    int nx = startX + checkX[i];
+                    int ny = startY + checkY[i];
+                    if (WorldGen.InWorld(nx, ny, 5))
+                    {
+                        ITile neighbor = Main.tile[nx, ny];
+                        if (neighbor != null && neighbor.active() && neighbor.type == placedTileType)
+                        {
+                            dirX = -checkX[i];
+                            dirY = -checkY[i];
+                            directionFound = true;
+                            break;
+                        }
+                    }
+                }
             }
 
+            config.LastPlaced = new Point(startX, startY);
+
+            if (!directionFound)
+                return;
+
+            Player player = tsPlayer.TPlayer;
             int maxPickPower = GetHighestPickaxePower(player);
 
             processingPlayers.Add(tsPlayer.Index);
             try
             {
+                if (dirX != 0 && dirY != 0 && placedTileType == TileID.Platforms)
+                {
+                    byte slope = (dirX == dirY) ? (byte)1 : (byte)2;
+                    WorldGen.SlopeTile(startX, startY, slope);
+                    TSPlayer.All.SendTileSquareCentered(startX, startY, 1);
+                }
+
                 for (int step = 1; step < config.Length; step++)
                 {
                     int targetX = startX + (dirX * step);
@@ -227,6 +252,7 @@ namespace AutoPlatformPlugin
                     }
 
                     TSPlayer.All.SendTileSquareCentered(targetX, targetY, 1);
+                    config.LastPlaced = new Point(targetX, targetY);
                 }
             }
             finally
