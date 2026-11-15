@@ -12,20 +12,20 @@ namespace AutoPlatformPlugin
     public class AutoPlatform : TerrariaPlugin
     {
         public override string Name => "AutoPlatform";
-        public override Version Version => new Version(1, 1, 0);
-        public override string Author => "CustomPlugin";
-        public override string Description => "Memasang platform otomatis 8 arah (horizontal, vertikal, diagonal) sesuai pickaxe power.";
+        public override Version Version => new Version(1, 2, 1);
+        public override Author => "CustomPlugin";
+        public override string Description => "Memasang platform otomatis 8 arah (Smart Cursor) dengan pengurangan stok inventory yang akurat.";
 
         private class PlayerPlatConfig
         {
             public bool Enabled { get; set; } = false;
             public int Length { get; set; } = 15;
             public bool BreakBlocks { get; set; } = false;
+            public Point? LastPlaced { get; set; } = null;
         }
 
         private Dictionary<int, PlayerPlatConfig> playerConfigs = new Dictionary<int, PlayerPlatConfig>();
         private HashSet<int> processingPlayers = new HashSet<int>();
-        private int lastConsumedItemType = 0;
 
         public AutoPlatform(Main game) : base(game) { }
 
@@ -67,10 +67,11 @@ namespace AutoPlatformPlugin
             if (args.Parameters.Count == 0)
             {
                 config.Enabled = !config.Enabled;
+                config.LastPlaced = null;
                 if (config.Enabled)
                 {
                     string modeText = config.BreakBlocks ? "BREAK (Tembus Blok)" : "UNBREAK (Stop di Blok)";
-                    args.Player.SendSuccessMessage($"[AutoPlat] Aktif! Panjang: {config.Length} | Mode: {modeText}. Taruh 1 platform ke arah yang diinginkan (8 arah)!");
+                    args.Player.SendSuccessMessage($"[AutoPlat] Aktif! Panjang: {config.Length} | Mode: {modeText}. Taruh 2 platform berurutan ke arah panah Smart Cursor!");
                 }
                 else
                 {
@@ -84,6 +85,7 @@ namespace AutoPlatformPlugin
             if (param == "off" || param == "stop" || param == "matikan")
             {
                 config.Enabled = false;
+                config.LastPlaced = null;
                 args.Player.SendInfoMessage("[AutoPlat] Dimatikan.");
             }
             else if (param == "break")
@@ -131,47 +133,70 @@ namespace AutoPlatformPlugin
 
             int startX = args.X;
             int startY = args.Y;
-            ushort placedTileType = args.EditData;
+            ushort placedTileType = (ushort)args.EditData;
             byte style = args.Style;
 
             if (placedTileType != TileID.Platforms && placedTileType != TileID.PlanterBox)
                 return;
 
-            Player player = tsPlayer.TPlayer;
-
-            Vector2 playerCenterTile = player.Center / 16f;
-            Vector2 delta = new Vector2(startX + 0.5f - playerCenterTile.X, startY + 0.5f - playerCenterTile.Y);
-
             int dirX = 0;
             int dirY = 0;
+            bool directionFound = false;
 
-            if (delta.LengthSquared() > 0.01f)
+            if (config.LastPlaced.HasValue)
             {
-                double angle = Math.Atan2(delta.Y, delta.X);
-                int sector = (int)Math.Round(angle / (Math.PI / 4.0));
-                switch (sector)
+                int dx = startX - config.LastPlaced.Value.X;
+                int dy = startY - config.LastPlaced.Value.Y;
+
+                if (Math.Abs(dx) <= 1 && Math.Abs(dy) <= 1 && (dx != 0 || dy != 0))
                 {
-                    case 0:  dirX = 1;  dirY = 0;  break;
-                    case 1:  dirX = 1;  dirY = 1;  break;
-                    case 2:  dirX = 0;  dirY = 1;  break;
-                    case 3:  dirX = -1; dirY = 1;  break;
-                    case 4:
-                    case -4: dirX = -1; dirY = 0;  break;
-                    case -3: dirX = -1; dirY = -1; break;
-                    case -2: dirX = 0;  dirY = -1; break;
-                    case -1: dirX = 1;  dirY = -1; break;
+                    dirX = dx;
+                    dirY = dy;
+                    directionFound = true;
                 }
             }
-            else
+
+            if (!directionFound)
             {
-                dirX = player.direction;
+                int[] checkX = { -1, 1, 0, 0, -1, 1, -1, 1 };
+                int[] checkY = { 0, 0, -1, 1, -1, -1, 1, 1 };
+
+                for (int i = 0; i < 8; i++)
+                {
+                    int nx = startX + checkX[i];
+                    int ny = startY + checkY[i];
+                    if (WorldGen.InWorld(nx, ny, 5))
+                    {
+                        ITile neighbor = Main.tile[nx, ny];
+                        if (neighbor != null && neighbor.active() && neighbor.type == placedTileType)
+                        {
+                            dirX = -checkX[i];
+                            dirY = -checkY[i];
+                            directionFound = true;
+                            break;
+                        }
+                    }
+                }
             }
 
+            config.LastPlaced = new Point(startX, startY);
+
+            if (!directionFound)
+                return;
+
+            Player player = tsPlayer.TPlayer;
             int maxPickPower = GetHighestPickaxePower(player);
 
             processingPlayers.Add(tsPlayer.Index);
             try
             {
+                if (dirX != 0 && dirY != 0 && placedTileType == TileID.Platforms)
+                {
+                    byte slope = (dirX == dirY) ? (byte)1 : (byte)2;
+                    WorldGen.SlopeTile(startX, startY, slope);
+                    TSPlayer.All.SendTileSquareCentered(startX, startY, 1);
+                }
+
                 for (int step = 1; step < config.Length; step++)
                 {
                     int targetX = startX + (dirX * step);
@@ -180,7 +205,7 @@ namespace AutoPlatformPlugin
                     if (!WorldGen.InWorld(targetX, targetY, 10))
                         break;
 
-                    if (!ConsumeMatchingPlatformItem(tsPlayer, placedTileType, style))
+                    if (CountMatchingPlatforms(player, placedTileType, style) <= 0)
                     {
                         tsPlayer.SendInfoMessage("[AutoPlat] Stok platform di tas habis!");
                         break;
@@ -201,23 +226,20 @@ namespace AutoPlatformPlugin
                             }
                             else
                             {
-                                RefundPlatformItem(tsPlayer);
                                 break;
                             }
                         }
                         else
                         {
-                            RefundPlatformItem(tsPlayer);
                             break;
                         }
                     }
 
                     bool placed = WorldGen.PlaceTile(targetX, targetY, placedTileType, true, true, tsPlayer.Index, style);
                     if (!placed)
-                    {
-                        RefundPlatformItem(tsPlayer);
                         break;
-                    }
+
+                    ConsumeOnePlatform(tsPlayer, placedTileType, style);
 
                     if (dirX != 0 && dirY != 0 && placedTileType == TileID.Platforms)
                     {
@@ -226,11 +248,58 @@ namespace AutoPlatformPlugin
                     }
 
                     TSPlayer.All.SendTileSquareCentered(targetX, targetY, 1);
+                    config.LastPlaced = new Point(targetX, targetY);
                 }
             }
             finally
             {
                 processingPlayers.Remove(tsPlayer.Index);
+            }
+        }
+
+        private int CountMatchingPlatforms(Player player, ushort tileType, byte style)
+        {
+            int total = 0;
+            for (int i = 0; i < 50; i++)
+            {
+                Item item = player.inventory[i];
+                if (item != null && item.stack > 0 && item.createTile == tileType && item.placeStyle == style)
+                {
+                    total += item.stack;
+                }
+            }
+            return total;
+        }
+
+        private void ConsumeOnePlatform(TSPlayer tsPlayer, ushort tileType, byte style)
+        {
+            Player player = tsPlayer.TPlayer;
+
+            int heldSlot = player.selectedItem;
+            if (heldSlot >= 0 && heldSlot < 50)
+            {
+                Item held = player.inventory[heldSlot];
+                if (held != null && held.stack > 0 && held.createTile == tileType && held.placeStyle == style)
+                {
+                    held.stack--;
+                    if (held.stack <= 0) held.TurnToAir();
+
+                    tsPlayer.SendData(PacketTypes.PlayerSlot, "", tsPlayer.Index, heldSlot, held.prefix);
+                    return;
+                }
+            }
+
+            for (int i = 0; i < 50; i++)
+            {
+                Item invItem = player.inventory[i];
+                if (invItem != null && invItem.stack > 0 && invItem.createTile == tileType && invItem.placeStyle == style)
+                {
+                    invItem.stack--;
+                    if (invItem.stack <= 0) invItem.TurnToAir();
+
+                    tsPlayer.SendData(PacketTypes.PlayerSlot, "", tsPlayer.Index, i, invItem.prefix);
+                    return;
+                }
             }
         }
 
@@ -294,44 +363,6 @@ namespace AutoPlatformPlugin
             }
 
             return pickPower >= requiredPower;
-        }
-
-        private bool ConsumeMatchingPlatformItem(TSPlayer tsPlayer, ushort tileType, byte style)
-        {
-            Player player = tsPlayer.TPlayer;
-
-            Item held = player.HeldItem;
-            if (held != null && held.stack > 0 && held.createTile == tileType && held.placeStyle == style)
-            {
-                lastConsumedItemType = held.type;
-                held.stack--;
-                if (held.stack <= 0) held.TurnToAir();
-                NetMessage.SendData((int)PacketTypes.PlayerSlot, -1, -1, null, tsPlayer.Index, player.selectedItem);
-                return true;
-            }
-
-            for (int i = 0; i < 50; i++)
-            {
-                Item invItem = player.inventory[i];
-                if (invItem != null && invItem.stack > 0 && invItem.createTile == tileType && invItem.placeStyle == style)
-                {
-                    lastConsumedItemType = invItem.type;
-                    invItem.stack--;
-                    if (invItem.stack <= 0) invItem.TurnToAir();
-                    NetMessage.SendData((int)PacketTypes.PlayerSlot, -1, -1, null, tsPlayer.Index, i);
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
-        private void RefundPlatformItem(TSPlayer tsPlayer)
-        {
-            if (lastConsumedItemType > 0)
-            {
-                tsPlayer.GiveItem(lastConsumedItemType, 1);
-            }
         }
     }
 }
