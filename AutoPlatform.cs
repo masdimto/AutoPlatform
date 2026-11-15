@@ -8,12 +8,12 @@ using Microsoft.Xna.Framework;
 
 namespace AutoPlatformPlugin
 {
-    [ApiVersion(2, 1)]
+     [ApiVersion(2, 1)]
     public class AutoPlatform : TerrariaPlugin
     {
         public override string Name => "AutoPlatform";
         public override Version Version => new Version(1, 2, 1);
-        public override Author => "CustomPlugin";
+        public override string Author => "CustomPlugin";
         public override string Description => "Memasang platform otomatis 8 arah (Smart Cursor) dengan pengurangan stok inventory yang akurat.";
 
         private class PlayerPlatConfig
